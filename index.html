@@ -141,7 +141,35 @@
 <script>
 (function(){
 'use strict';
-const TZ='Africa/Cairo';
+/* ---------- time: don't trust the TV's clock or its time-zone data ---------- */
+let skew=0;                                   // server time minus TV time
+const nowMs=()=>Date.now()+skew;
+async function syncClock(){
+  try{
+    const t0=Date.now(), r=await fetch(location.href.split('#')[0].split('?')[0]+'?t='+t0,{method:'HEAD',cache:'no-store'});
+    const h=r.headers.get('date'); if(!h) return;
+    const t1=Date.now(), srv=Date.parse(h); if(isNaN(srv)) return;
+    skew=srv+500-(t0+t1)/2;                   // Date header is whole seconds; +0.5s centres it
+  }catch(e){}
+}
+/* Egypt: UTC+2, summer time UTC+3 from the last Friday of April to the end of the last Thursday of October */
+function lastDow(y,m,dow){ const d=new Date(Date.UTC(y,m+1,0)); d.setUTCDate(d.getUTCDate()-((d.getUTCDay()-dow+7)%7)); return d.getTime(); }
+function cairoOffset(ms){
+  const y=new Date(ms).getUTCFullYear();
+  const start=lastDow(y,3,5)-2*3600000;
+  const end=lastDow(y,9,4)+24*3600000-3*3600000;
+  return (ms>=start&&ms<end)?3:2;
+}
+const local=ms=>new Date(ms+cairoOffset(ms)*3600000);
+const DAYS=['الأحد','الاثنين','الثلاثاء','الأربعاء','الخميس','الجمعة','السبت'];
+const MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+const dig=n=>String(n).replace(/\d/g,c=>'٠١٢٣٤٥٦٧٨٩'[c]);
+const pad=n=>(n<10?'0':'')+n;
+function clockParts(ms){
+  const d=local(ms); let h=d.getUTCHours(); const m=d.getUTCMinutes();
+  if(S.fmt==='24') return {t:dig(pad(h)+':'+pad(m)),ap:''};
+  const ap=h<12?'ص':'م'; h=h%12||12; return {t:dig(h+':'+pad(m)),ap};
+}
 const CITIES={'مدينة نصر':[30.0561,31.3301],'القاهرة':[30.0444,31.2357],'الجيزة':[30.0131,31.2089],'الإسكندرية':[31.2001,29.9187],'دمياط':[31.4165,31.8133],
  'المنصورة':[31.0409,31.3785],'طنطا':[30.7865,31.0004],'الزقازيق':[30.5877,31.502],'بنها':[30.466,31.1858],'شبين الكوم':[30.5526,31.009],
  'دمنهور':[31.0341,30.4682],'كفر الشيخ':[31.1107,30.9388],'بورسعيد':[31.2653,32.3019],'الإسماعيلية':[30.5965,32.2715],'السويس':[29.9668,32.5498],
@@ -200,29 +228,27 @@ function compute(y,m,d,lat,lng){
   const base=Date.UTC(y,m-1,d);
   return r.map(h=>base+(h-lng/15)*3600000);   // [fajr, sunrise, dhuhr, asr, maghrib, isha]
 }
-function ymd(ms){ return new Intl.DateTimeFormat('en-CA',{timeZone:TZ,year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(ms)).split('-').map(Number); }
+function ymd(ms){ const d=local(ms); return [d.getUTCFullYear(),d.getUTCMonth()+1,d.getUTCDate()]; }
 function times(dayOffset){
-  const [y,m,d]=ymd(Date.now()+(dayOffset||0)*86400000), c=CITIES[S.city]||CITIES['القاهرة'];
+  const [y,m,d]=ymd(nowMs()+(dayOffset||0)*86400000), c=CITIES[S.city]||CITIES['القاهرة'];
   const adj=String(S.adjust||'').split(/[,،\s]+/).map(x=>+x||0);
   const t=compute(y,m,d,c[0],c[1]);
   [0,2,3,4,5].forEach((k,i)=>{ t[k]+=(adj[i]||0)*60000; });
   return t;
 }
-const hm=ms=>new Date(ms).toLocaleTimeString('ar-EG',{timeZone:TZ,hour:'numeric',minute:'2-digit',hour12:S.fmt!=='24'}).replace(/\s?[صم]$/,'');
+const hm=ms=>clockParts(ms).t;
 const ar=n=>n.toLocaleString('ar-EG');
 
 /* ---------- render ---------- */
 const $=id=>document.getElementById(id);
 let blackOn=false;
 function tick(){
-  const now=Date.now(), d=new Date(now);
-  const parts=new Intl.DateTimeFormat('ar-EG',{timeZone:TZ,hour:'numeric',minute:'2-digit',hour12:S.fmt!=='24'}).formatToParts(d);
-  const hh=parts.filter(p=>p.type==='hour'||p.type==='minute'||p.type==='literal'&&p.value.trim()===':').map(p=>p.value).join('');
-  const ap=(parts.find(p=>p.type==='dayPeriod')||{}).value||'';
-  $('clock').innerHTML=hh+(ap?`<small>${ap}</small>`:'');
-  $('day').textContent=d.toLocaleDateString('ar-EG',{timeZone:TZ,weekday:'long'});
-  $('greg').textContent=d.toLocaleDateString('ar-EG',{timeZone:TZ,day:'numeric',month:'long',year:'numeric'});
-  $('hijri').textContent=new Intl.DateTimeFormat('ar-EG-u-ca-islamic-umalqura',{timeZone:TZ,day:'numeric',month:'long',year:'numeric'}).format(d);
+  const now=nowMs(), L=local(now), cp=clockParts(now);
+  $('clock').innerHTML=cp.t+(cp.ap?`<small>${cp.ap}</small>`:'');
+  $('day').textContent=DAYS[L.getUTCDay()];
+  $('greg').textContent=dig(L.getUTCDate())+' '+MONTHS[L.getUTCMonth()]+' '+dig(L.getUTCFullYear());
+  let hij=''; try{ hij=new Intl.DateTimeFormat('ar-EG-u-ca-islamic-umalqura',{timeZone:'UTC',day:'numeric',month:'long',year:'numeric'}).format(L); if(!/ه/.test(hij)) hij=''; }catch(e){}
+  $('hijri').textContent=hij;
 
   const t=times(0), prayerIdx=[0,2,3,4,5];
   let ni=prayerIdx.find(k=>t[k]>now), nextMs, nextName;
@@ -232,7 +258,7 @@ function tick(){
   const labels=['الفجر','الشروق','الظهر','العصر','المغرب','العشاء'];
   $('prayers').innerHTML=t.map((ms,k)=>`<div class="p${k===ni?' is-next':''}${k===1?' sunrise':''}"><span>${labels[k]}</span><strong>${hm(ms)}</strong></div>`).join('');
 
-  const friday=new Intl.DateTimeFormat('en-US',{timeZone:TZ,weekday:'short'}).format(d)==='Fri';
+  const friday=L.getUTCDay()===5;
   let off=-1;
   prayerIdx.forEach((k,i)=>{ if(!S.prayers[i]) return;
     const dur=(i===1&&friday)?S.friday:S.after;
@@ -325,6 +351,7 @@ function shrink(file){ return new Promise(res=>{ const r=new FileReader(); r.onl
 
 /* ---------- go ---------- */
 applyBg(); tick(); showVerse();
+syncClock().then(tick); setInterval(syncClock,3600000);
 setInterval(tick,5000);
 setInterval(showVerse,60000);
 setTimeout(()=>location.reload(),24*3600000);   // fresh start every day for a TV left on
